@@ -775,16 +775,20 @@ impl RenderedWindow {
                     self.grid_destination = grid_position;
                 }
 
-                let height = new_grid_size.height as usize;
-                self.actual_lines.resize(height, None);
-                self.grid_size = new_grid_size;
+                // Neovim re-sends win_pos with an unchanged size, e.g. whenever any window
+                // (including a float) closes. Rebuilding the scrollback then would throw away an
+                // in-flight scroll animation.
+                if new_grid_size != self.grid_size {
+                    let height = new_grid_size.height as usize;
+                    let height_changed = height != self.actual_lines.len();
+                    self.actual_lines.resize(height, None);
+                    self.grid_size = new_grid_size;
+                    self.rebuild_scrollback();
 
-                self.scrollback_lines.resize(2 * height, None);
-                self.scrollback_lines.clone_from_iter(&self.actual_lines);
-                self.scroll_delta = 0;
-
-                if height != self.actual_lines.len() {
-                    self.scroll_animation.reset();
+                    // The old scroll offset doesn't map onto the resized scrollback
+                    if height_changed {
+                        self.scroll_animation.reset();
+                    }
                 }
 
                 self.anchor_info = anchor_info;
@@ -865,14 +869,10 @@ impl RenderedWindow {
             return;
         }
         // If the borders are changed, reset the scrollback to only fit the inner view
-        let inner_range = self.viewport_margins.top as isize
-            ..(self.actual_lines.len() - self.viewport_margins.bottom as usize) as isize;
+        let inner_range = self.inner_line_range();
         let inner_size = inner_range.len();
-        let inner_view = self.actual_lines.iter_range(inner_range);
         if inner_size != self.scrollback_lines.len() / 2 {
-            self.scrollback_lines.resize(2 * inner_size, None);
-            self.scrollback_lines.clone_from_iter(inner_view);
-            self.scroll_delta = 0;
+            self.rebuild_scrollback();
             self.scroll_animation.reset();
             return;
         }
@@ -880,27 +880,27 @@ impl RenderedWindow {
         let scroll_delta = self.scroll_delta;
         self.scrollback_lines.rotate(scroll_delta);
 
-        self.scrollback_lines.clone_from_iter(inner_view);
+        self.scrollback_lines.clone_from_iter(self.actual_lines.iter_range(inner_range));
 
         if scroll_delta != 0 {
             let mut scroll_offset = self.scroll_animation.position;
 
-            let max_delta =
-                self.scrollback_lines.len().saturating_sub(self.grid_size.height as usize);
+            // The scrollback holds the inner view and the same number of lines again, so
+            // everything has to be sized by the inner view, not the full grid with its margins.
+            let max_delta = inner_size;
             log::trace!(
                 "Scroll offset {scroll_offset}, delta {scroll_delta}, max_delta {max_delta}"
             );
             // Do a limited scroll with empty lines when scrolling far
             if scroll_delta.unsigned_abs() > max_delta {
-                let far_lines = renderer_settings
-                    .scroll_animation_far_lines
-                    .min(self.actual_lines.len() as u32) as isize;
+                let far_lines =
+                    renderer_settings.scroll_animation_far_lines.min(inner_size as u32) as isize;
 
                 scroll_offset = -(far_lines * scroll_delta.signum()) as f32;
                 let empty_lines = if scroll_delta > 0 {
                     -far_lines..0
                 } else {
-                    self.actual_lines.len() as isize..self.actual_lines.len() as isize + far_lines
+                    inner_size as isize..inner_size as isize + far_lines
                 };
                 for i in empty_lines {
                     self.scrollback_lines[i] = None;
@@ -914,6 +914,20 @@ impl RenderedWindow {
             self.scroll_animation.position = scroll_offset;
             log::trace!("Current scroll {scroll_offset}");
         }
+        self.scroll_delta = 0;
+    }
+
+    /// The rows of `actual_lines` that scroll, i.e. excluding the viewport margins (winbar,
+    /// borders).
+    fn inner_line_range(&self) -> Range<isize> {
+        self.viewport_margins.top as isize
+            ..self.actual_lines.len().saturating_sub(self.viewport_margins.bottom as usize) as isize
+    }
+
+    fn rebuild_scrollback(&mut self) {
+        let inner_range = self.inner_line_range();
+        self.scrollback_lines.resize(2 * inner_range.len(), None);
+        self.scrollback_lines.clone_from_iter(self.actual_lines.iter_range(inner_range));
         self.scroll_delta = 0;
     }
 
@@ -1350,15 +1364,123 @@ mod tests {
         }))
     }
 
-    fn positioned_rendered_window(grid_size: (u64, u64)) -> RenderedWindow {
-        let mut window = RenderedWindow::new(BASE_GRID_ID);
-        window.handle_window_draw_command(WindowDrawCommand::Position {
+    fn position_command(grid_size: (u64, u64)) -> WindowDrawCommand {
+        WindowDrawCommand::Position {
             grid_position: (0.0, 0.0),
             grid_size,
             anchor_info: None,
             window_type: WindowType::Editor,
-        });
+        }
+    }
+
+    fn positioned_rendered_window(grid_size: (u64, u64)) -> RenderedWindow {
+        let mut window = RenderedWindow::new(BASE_GRID_ID);
+        window.handle_window_draw_command(position_command(grid_size));
         window
+    }
+
+    /// A flushed window with every row drawn and the given top margin (e.g. a winbar).
+    fn drawn_rendered_window(grid_size: (u64, u64), top_margin: u64) -> RenderedWindow {
+        let mut window = positioned_rendered_window(grid_size);
+        window.handle_window_draw_command(WindowDrawCommand::ViewportMargins {
+            top: top_margin,
+            bottom: 0,
+            left: 0,
+            right: 0,
+        });
+        for row in 0..grid_size.1 as usize {
+            window.actual_lines[row] = Some(test_rendered_line());
+        }
+        window.flush(&RendererSettings::default());
+        window
+    }
+
+    fn scroll(window: &mut RenderedWindow, scroll_delta: f64, settings: &RendererSettings) {
+        window.handle_window_draw_command(WindowDrawCommand::Viewport { scroll_delta });
+        window.flush(settings);
+    }
+
+    #[test]
+    fn redundant_position_keeps_scroll_with_viewport_margins() {
+        let settings = RendererSettings::default();
+        let mut window = drawn_rendered_window((20, 10), 1);
+        scroll(&mut window, 3.0, &settings);
+        assert_eq!(window.scroll_animation.position, -3.0);
+        assert_eq!(window.scrollback_lines.len(), 18);
+
+        // Neovim re-sends an unchanged win_pos whenever any window, such as a float, closes
+        window.handle_window_draw_command(position_command((20, 10)));
+        window.flush(&settings);
+
+        assert_eq!(window.scroll_animation.position, -3.0);
+        assert_eq!(window.scrollback_lines.len(), 18);
+        assert!(window.scrollback_lines.iter_range(-3..9).all(Option::is_some));
+    }
+
+    #[test]
+    fn redundant_position_keeps_pending_scroll_delta() {
+        let settings = RendererSettings::default();
+        let mut window = drawn_rendered_window((20, 10), 0);
+
+        window.handle_window_draw_command(WindowDrawCommand::Viewport { scroll_delta: 3.0 });
+        window.handle_window_draw_command(position_command((20, 10)));
+        window.flush(&settings);
+
+        assert_eq!(window.scroll_animation.position, -3.0);
+    }
+
+    #[test]
+    fn position_height_change_resets_scroll_and_respects_margins() {
+        let settings = RendererSettings::default();
+        for top_margin in [0, 1] {
+            let mut window = drawn_rendered_window((20, 10), top_margin);
+            scroll(&mut window, 3.0, &settings);
+
+            window.handle_window_draw_command(position_command((20, 12)));
+            window.flush(&settings);
+
+            assert_eq!(window.scroll_animation.position, 0.0);
+            assert_eq!(window.scrollback_lines.len(), 2 * (12 - top_margin as usize));
+        }
+    }
+
+    // Guards against the regression in #2208: a width-only resize left `grid_size` stale, so a
+    // full-window scroll at the new width wasn't recognized and the rendered lines didn't move.
+    #[test]
+    fn width_only_resize_updates_grid_size_for_scrolls() {
+        let mut window = drawn_rendered_window((20, 10), 0);
+        let line = window.actual_lines[3].clone().unwrap();
+
+        window.handle_window_draw_command(position_command((30, 10)));
+        assert_eq!(window.grid_size, GridSize::new(30, 10));
+
+        window.handle_window_draw_command(WindowDrawCommand::Scroll {
+            top: 0,
+            bottom: 10,
+            left: 0,
+            right: 30,
+            rows: 3,
+            cols: 0,
+        });
+        assert!(Rc::ptr_eq(window.actual_lines[0].as_ref().unwrap(), &line));
+    }
+
+    #[test]
+    fn far_scroll_with_viewport_margins_keeps_visible_rows() {
+        let settings =
+            RendererSettings { scroll_animation_far_lines: 9999, ..RendererSettings::default() };
+
+        let mut window = drawn_rendered_window((20, 10), 1);
+        scroll(&mut window, 20.0, &settings);
+        assert_eq!(window.scroll_animation.position, -9.0);
+        assert!(window.scrollback_lines.iter_range(0..9).all(Option::is_some));
+        assert!(window.scrollback_lines.iter_range(-9..0).all(Option::is_none));
+
+        let mut window = drawn_rendered_window((20, 10), 1);
+        scroll(&mut window, -20.0, &settings);
+        assert_eq!(window.scroll_animation.position, 9.0);
+        assert!(window.scrollback_lines.iter_range(0..9).all(Option::is_some));
+        assert!(window.scrollback_lines.iter_range(9..18).all(Option::is_none));
     }
 
     #[test]
