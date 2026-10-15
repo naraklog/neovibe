@@ -282,7 +282,7 @@ Accepted values:
 - `round_small`
 - `do_not_round`
 
-#### Window Blur (Currently macOS only)
+#### Window Blur
 
 VimScript:
 
@@ -298,9 +298,28 @@ vim.g.neovide_window_blurred = true
 
 **Available since 0.12.**
 
-Setting `g:neovide_window_blurred` toggles the window blur state.
+Setting `g:neovide_window_blurred` toggles the window blur state. Only what's behind the window is
+blurred, so it only has an effect while `g:neovide_opacity` or `g:neovide_normal_opacity` is below
+1.0. Supported on macOS, on Windows (Acrylic) and on Wayland compositors that support KDE's blur
+protocol.
 
-The blurred level respects the `g:neovide_opacity` value between 0.0 and 1.0.
+#### Window Blur Radius (macOS only)
+
+VimScript:
+
+```vim
+let g:neovide_window_blur_radius = 20
+```
+
+Lua:
+
+```lua
+vim.g.neovide_window_blur_radius = 20
+```
+
+Setting `g:neovide_window_blur_radius` sets how strongly the window background is blurred when
+`g:neovide_window_blurred` is enabled, between 0 (no blur) and 255. The default is 20, the same as
+Ghostty's `background-blur = true`. It used to be fixed at 80, set it to 80 to keep that look.
 
 #### Floating Blur Amount
 

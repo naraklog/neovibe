@@ -678,6 +678,17 @@ impl WinitWindowWrapper {
         }
     }
 
+    /// On macOS `MacosWindowFeature` applies the blur instead, since winit can't set the radius.
+    #[cfg(not(target_os = "macos"))]
+    fn apply_winit_blur(&self, window_ids: &[WindowId]) {
+        let blur = self.settings.get::<WindowSettings>().blur_enabled();
+        for window_id in window_ids {
+            if let Some(route) = self.routes.get(window_id) {
+                route.window.winit_window.set_blur(blur);
+            }
+        }
+    }
+
     pub fn handle_window_settings_changed(
         &mut self,
         target: EventTarget,
@@ -734,16 +745,8 @@ impl WinitWindowWrapper {
                     }
                 }
             }
-            WindowSettingsChanged::WindowBlurred(blur) => {
-                let WindowSettings { opacity, .. } = self.settings.get::<WindowSettings>();
-                let transparent = opacity < 1.0;
-                for window_id in window_ids.iter() {
-                    if let Some(route) = self.routes.get(window_id) {
-                        let window = route.window.winit_window.clone();
-                        window.set_blur(blur && transparent);
-                    }
-                }
-            }
+            #[cfg(not(target_os = "macos"))]
+            WindowSettingsChanged::WindowBlurred(..) => self.apply_winit_blur(&window_ids),
             WindowSettingsChanged::MessageAreaDragSelection(enabled) if !enabled => {
                 for window_id in window_ids.iter() {
                     if let Some(route) = self.routes.get(window_id) {
@@ -759,6 +762,8 @@ impl WinitWindowWrapper {
                         renderer.prepare_lines(true);
                     }
                 }
+                #[cfg(not(target_os = "macos"))]
+                self.apply_winit_blur(&window_ids);
             }
             WindowSettingsChanged::Theme(..) => {
                 for window_id in window_ids.iter() {
@@ -1467,6 +1472,11 @@ impl WinitWindowWrapper {
         skia_renderer.swap_buffers();
         if self.ui_state == UIState::FirstFrame {
             window.set_visible(true);
+            // The window server doesn't always keep a blur set while the window was hidden
+            #[cfg(target_os = "macos")]
+            if let Some(feature) = &route.window.macos_feature {
+                feature.borrow().update_blur();
+            }
             self.ui_state = UIState::Showing;
         }
 
@@ -1580,8 +1590,7 @@ impl WinitWindowWrapper {
 
         let WindowSettings {
             input_ime,
-            opacity,
-            normal_opacity,
+            #[cfg(target_os = "windows")]
             window_blurred,
             fullscreen,
             #[cfg(target_os = "macos")]
@@ -1768,7 +1777,9 @@ impl WinitWindowWrapper {
             renderer.borrow().grid_renderer.grid_scale
         );
 
-        window.set_blur(window_blurred && opacity.min(normal_opacity) < 1.0);
+        // On macOS `MacosWindowFeature` sets the blur with the configured radius
+        #[cfg(not(target_os = "macos"))]
+        window.set_blur(self.settings.get::<WindowSettings>().blur_enabled());
 
         #[cfg(target_os = "windows")]
         if window_blurred {
@@ -1874,7 +1885,9 @@ impl WinitWindowWrapper {
             window.set_visible(true);
             #[cfg(target_os = "macos")]
             if let Some(feature) = self.macos_feature_for_window(window.id()) {
-                feature.borrow().activate_and_focus();
+                let feature = feature.borrow();
+                feature.update_blur();
+                feature.activate_and_focus();
             }
         }
 

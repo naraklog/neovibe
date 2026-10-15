@@ -32,6 +32,7 @@ pub struct WindowSettings {
     pub touch_deadzone: f32,
     pub touch_drag_timeout: f32,
     pub window_blurred: bool,
+    pub window_blur_radius: u32,
     pub message_area_drag_selection: bool,
     #[cfg(target_os = "windows")]
     pub corner_preference: CornerPreference,
@@ -82,6 +83,7 @@ impl Default for WindowSettings {
             touch_deadzone: 6.0,
             touch_drag_timeout: 0.17,
             window_blurred: false,
+            window_blur_radius: 20,
             message_area_drag_selection: true,
             #[cfg(target_os = "windows")]
             corner_preference: CornerPreference::Default,
@@ -103,6 +105,22 @@ impl Default for WindowSettings {
             observed_columns: None,
             observed_lines: None,
         }
+    }
+}
+
+/// Higher radii render strangely and get slow, Ghostty uses the same limit.
+pub const MAX_WINDOW_BLUR_RADIUS: u32 = 255;
+
+impl WindowSettings {
+    /// The OS only blurs behind the window when blur is on and something is actually translucent.
+    pub fn blur_enabled(&self) -> bool {
+        self.window_blurred && self.opacity.min(self.normal_opacity) < 1.0
+    }
+
+    /// The blur radius to apply, 0 meaning no blur.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    pub fn effective_blur_radius(&self) -> u32 {
+        if self.blur_enabled() { self.window_blur_radius.min(MAX_WINDOW_BLUR_RADIUS) } else { 0 }
     }
 }
 
@@ -200,5 +218,32 @@ impl From<CornerPreference> for winit::platform::windows::CornerPreference {
             CornerPreference::RoundSmall => WinitCornerPreference::RoundSmall,
             CornerPreference::DoNotRound => WinitCornerPreference::DoNotRound,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blurred_settings(opacity: f32, normal_opacity: f32) -> WindowSettings {
+        WindowSettings { window_blurred: true, opacity, normal_opacity, ..Default::default() }
+    }
+
+    #[test]
+    fn blur_enabled_requires_translucency() {
+        assert!(!WindowSettings { opacity: 0.9, ..Default::default() }.blur_enabled());
+        assert!(!blurred_settings(1.0, 1.0).blur_enabled());
+        assert!(blurred_settings(0.9, 1.0).blur_enabled());
+        assert!(blurred_settings(1.0, 0.8).blur_enabled());
+    }
+
+    #[test]
+    fn effective_blur_radius_defaults_to_20_and_clamps() {
+        assert_eq!(blurred_settings(0.9, 1.0).effective_blur_radius(), 20);
+
+        let settings = WindowSettings { window_blur_radius: 1000, ..blurred_settings(0.9, 1.0) };
+        assert_eq!(settings.effective_blur_radius(), MAX_WINDOW_BLUR_RADIUS);
+
+        assert_eq!(blurred_settings(1.0, 1.0).effective_blur_radius(), 0);
     }
 }

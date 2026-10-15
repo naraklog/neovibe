@@ -154,6 +154,14 @@ fn merge_all_windows_if_native_tabs(ns_window: &NSWindow) {
 #[link(name = "Quartz", kind = "framework")]
 unsafe extern "C" {}
 
+// Private window server API, AppKit has no public way to set the blur radius behind a window.
+// winit's `set_blur` uses it too, but with a fixed radius of 80.
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSDefaultConnectionForThread() -> i32;
+    fn CGSSetWindowBackgroundBlurRadius(connection: i32, window_number: isize, radius: i32) -> i32;
+}
+
 pub enum TouchpadStage {
     Soft,
     Click,
@@ -926,6 +934,25 @@ impl MacosWindowFeature {
             self.settings.get::<WindowSettings>();
         let opaque = opacity.min(normal_opacity) >= 1.0;
         self.update_ns_background(opaque, show_border);
+        self.update_blur();
+    }
+
+    /// Blurs what's behind the window with the configured radius, or removes the blur.
+    pub fn update_blur(&self) {
+        let radius = self.settings.get::<WindowSettings>().effective_blur_radius();
+        let window_number = self.ns_window.windowNumber();
+        let result = unsafe {
+            CGSSetWindowBackgroundBlurRadius(
+                CGSDefaultConnectionForThread(),
+                window_number,
+                radius as i32,
+            )
+        };
+        if result == 0 {
+            log::debug!("window {window_number} blur radius set to {radius}");
+        } else {
+            log::warn!("failed to set blur radius {radius} for window {window_number}: {result}");
+        }
     }
 
     pub fn set_document_state(&self, path: &str, modified: bool) {
@@ -966,6 +993,10 @@ impl MacosWindowFeature {
             WindowSettingsChanged::WindowBlurred(window_blurred) => {
                 log::info!("window_blurred changed to {window_blurred}");
                 self.update_background();
+            }
+            WindowSettingsChanged::WindowBlurRadius(window_blur_radius) => {
+                log::info!("window_blur_radius changed to {window_blur_radius}");
+                self.update_blur();
             }
             WindowSettingsChanged::MacosSimpleFullscreen(enabled) => {
                 self.set_simple_fullscreen_mode(enabled);
