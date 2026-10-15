@@ -8,6 +8,7 @@ pub mod profiler;
 pub mod progress_bar;
 mod rendered_layer;
 pub mod rendered_window;
+pub mod shaders;
 mod vsync;
 
 #[cfg(target_os = "windows")]
@@ -42,6 +43,7 @@ use crate::{
     renderer::{
         fonts::font_options::PixelGeometry,
         rendered_layer::{FloatingLayer, group_windows},
+        shaders::{FrameInputs, PostProcessor, ShaderPaths},
     },
     settings::*,
     units::{GridPos, GridRect, GridScale, GridSize, PixelPos, PixelRect, to_skia_rect},
@@ -113,6 +115,7 @@ pub struct RendererSettings {
     text_contrast: f32,
     experimental_layer_grouping: bool,
     pixel_geometry: PixelGeometry,
+    shader: ShaderPaths,
 }
 
 impl Default for RendererSettings {
@@ -136,6 +139,7 @@ impl Default for RendererSettings {
             text_contrast: 0.5,
             experimental_layer_grouping: false,
             pixel_geometry: PixelGeometry::default(),
+            shader: ShaderPaths::default(),
         }
     }
 }
@@ -172,6 +176,7 @@ pub struct Renderer {
     current_mode: EditorMode,
 
     pub progress_bar: ProgressBar,
+    post_processor: PostProcessor,
 
     pub rendered_windows: HashMap<u64, RenderedWindow>,
     pub window_regions: Vec<WindowDrawDetails>,
@@ -224,6 +229,7 @@ impl Renderer {
             window_regions,
             profiler,
             progress_bar,
+            post_processor: PostProcessor::default(),
             os_scale_factor,
             user_scale_factor,
             settings,
@@ -235,6 +241,7 @@ impl Renderer {
 
     pub fn handle_event(&mut self, event: &WindowEvent) {
         self.cursor_renderer.handle_event(event);
+        self.post_processor.handle_event(event);
     }
 
     pub fn font_names(&self) -> Vec<String> {
@@ -246,16 +253,29 @@ impl Renderer {
     }
 
     pub fn prepare_frame(&mut self) -> ShouldRender {
-        self.cursor_renderer.prepare_frame()
+        let mut should_render = self.cursor_renderer.prepare_frame();
+        // Load shaders before animating, so a shader that uses time keeps frames coming
+        let renderer_settings = self.settings.get::<RendererSettings>();
+        if self.post_processor.sync(&renderer_settings.shader) {
+            should_render.update(ShouldRender::Immediately);
+        }
+        should_render
     }
 
     pub fn draw_frame(
         &mut self,
-        root_canvas: &Canvas,
+        window_canvas: &Canvas,
         content_region: Option<&PixelRect<f32>>,
         dt: f32,
     ) {
         tracy_zone!("renderer_draw_frame");
+        // With shaders on, the frame is drawn offscreen and the shaders draw it into the window.
+        // It starts with a full, unclipped clear, so reusing that surface never copies the last frame.
+        let mut frame_surface = self.post_processor.begin_frame(window_canvas);
+        let root_canvas = match frame_surface.as_mut() {
+            Some(surface) => surface.canvas(),
+            None => window_canvas,
+        };
         let window_settings = self.settings.get::<WindowSettings>();
         let opacity = if window_settings.normal_opacity < 1.0 {
             window_settings.normal_opacity
@@ -394,6 +414,15 @@ impl Renderer {
         let progress_bar_settings = self.settings.get::<ProgressBarSettings>();
         self.progress_bar.draw(&progress_bar_settings, root_canvas, &self.grid_renderer, grid_size);
 
+        if self.post_processor.has_shaders() {
+            let inputs = FrameInputs {
+                time_delta: dt,
+                cursor: self.cursor_renderer.drawn_rect(),
+                cursor_color: self.cursor_renderer.drawn_color(&self.grid_renderer),
+            };
+            self.post_processor.present(frame_surface, window_canvas, &inputs);
+        }
+
         #[cfg(feature = "profiling")]
         plot_skia_cache();
     }
@@ -492,6 +521,7 @@ impl Renderer {
         let progress_bar_settings = self.settings.get::<ProgressBarSettings>();
         self.progress_bar.animate(&progress_bar_settings, dt);
         animating |= self.progress_bar.is_active();
+        animating |= self.post_processor.is_animating();
 
         animating
     }
@@ -695,6 +725,11 @@ impl Renderer {
         self.startup_message_ui_restored = false;
     }
 
+    /// Releases GPU resources, which must happen before the Skia context they belong to goes away.
+    pub fn release_gpu_resources(&mut self) {
+        self.post_processor.release_gpu_resources();
+    }
+
     pub fn get_cursor_destination(&self) -> PixelPos<f32> {
         self.cursor_renderer.get_destination()
     }
@@ -819,12 +854,9 @@ pub fn create_skia_renderer(
             Box::new(d3d::D3DSkiaRenderer::new(window.window.clone(), settings.clone()))
         }
         #[cfg(target_os = "macos")]
-        WindowConfigType::Metal => Box::new(metal::MetalSkiaRenderer::new(
-            window.window.clone(),
-            srgb,
-            vsync,
-            settings.clone(),
-        )),
+        WindowConfigType::Metal => {
+            Box::new(metal::MetalSkiaRenderer::new(window.window.clone(), vsync, settings.clone()))
+        }
     };
     tracy_create_gpu_context("main_render_context", renderer.as_ref());
     renderer

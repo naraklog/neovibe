@@ -3,6 +3,7 @@ use std::{rc::Rc, sync::Arc};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::NSColorSpace;
 use objc2_core_foundation::{CGFloat, CGSize};
+use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
 use objc2_metal::{
     MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable,
     MTLTexture,
@@ -86,16 +87,16 @@ pub struct MetalSkiaRenderer {
 }
 
 impl MetalSkiaRenderer {
-    pub fn new(window: Rc<Window>, srgb: bool, vsync: bool, settings: Arc<Settings>) -> Self {
+    pub fn new(window: Rc<Window>, vsync: bool, settings: Arc<Settings>) -> Self {
         log::info!("Initialize MetalSkiaRenderer...");
 
         let draw_size = window.inner_size();
         let ns_window = get_ns_window(&window);
 
-        ns_window.setColorSpace(Some(
-            if srgb { NSColorSpace::sRGBColorSpace() } else { NSColorSpace::deviceRGBColorSpace() }
-                .as_ref(),
-        ));
+        // Everything is rendered in sRGB, so tag it as such and let macOS convert it for the
+        // display. Untagged, wide gamut displays show the colors oversaturated.
+        ns_window.setColorSpace(Some(NSColorSpace::sRGBColorSpace().as_ref()));
+        let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }));
 
         let device =
             MTLCreateSystemDefaultDevice().expect("Failed to create Metal system default device.");
@@ -106,6 +107,11 @@ impl MetalSkiaRenderer {
             metal_layer.setFramebufferOnly(false);
             metal_layer.setDisplaySyncEnabled(vsync);
             metal_layer.setOpaque(false);
+            metal_layer.setColorspace(srgb.as_deref());
+            log::info!(
+                "Metal layer color space: {:?}",
+                CGColorSpace::name(metal_layer.colorspace().as_deref())
+            );
 
             let ns_view = ns_window.contentView().unwrap();
             ns_view.setWantsLayer(true);

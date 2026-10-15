@@ -164,6 +164,16 @@ pub struct RouteWindow {
     pub last_synced_grid_size: Option<GridSize<u32>>,
 }
 
+impl Drop for RouteWindow {
+    fn drop(&mut self) {
+        // `skia_renderer` is dropped before `renderer`, so the renderer's GPU surfaces would
+        // otherwise outlive the Skia context they belong to
+        if let Ok(mut renderer) = self.renderer.try_borrow_mut() {
+            renderer.release_gpu_resources();
+        }
+    }
+}
+
 impl fmt::Debug for RouteWindow {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("RouteWindow")

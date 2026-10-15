@@ -641,6 +641,68 @@ Group non-emtpy consecutive layers (zindex) together, so that the shadows and bl
 the whole group instead of each individual layer. This can get rid of some shadowing and blending
 artifacts, but cause worse problems like [#2574](https://github.com/neovide/neovide/issues/2574).
 
+#### Shaders
+
+VimScript:
+
+```vim
+let g:neovide_shader = "~/.config/neovide/shaders/scanlines.sksl"
+```
+
+Lua:
+
+```lua
+vim.g.neovide_shader = "~/.config/neovide/shaders/scanlines.sksl"
+-- or several, applied in order
+vim.g.neovide_shader = { "~/.config/neovide/shaders/a.sksl", "~/.config/neovide/shaders/b.sksl" }
+```
+
+Runs your own shaders over everything Neovide draws, the whole window including floating windows,
+the cursor, the progress bar and the profiler. Set it to `""` to turn them off. Saved changes to a shader file are picked up the
+next time Neovide redraws, and if a shader doesn't compile the error is shown and the previous
+version keeps running.
+
+Shaders are written in [SkSL](https://skia.org/docs/user/sksl/), the shading language of Skia,
+which Neovide renders with, so the same file works on every platform. A shader has a `main`
+function that returns the color of one pixel, and declares the inputs it uses, all of them optional:
+
+```glsl
+uniform shader frame;          // what Neovide drew, read it with frame.eval(coord)
+uniform float2 resolution;     // window size in pixels
+uniform float  time;           // seconds since the shader was loaded
+uniform float  time_delta;     // seconds since the previous frame
+uniform float4 cursor;         // the cursor as drawn, following its animation: x, y, width, height
+uniform half4  cursor_color;   // the cursor color, premultiplied
+uniform float2 mouse;          // mouse position in pixels
+uniform float  focused;        // 1.0 while the window has focus, 0.0 otherwise
+
+half4 main(float2 coord) {     // coord: center of the pixel, origin at the top left
+    return frame.eval(coord);
+}
+```
+
+For example, darkening every third row:
+
+```glsl
+uniform shader frame;
+
+half4 main(float2 coord) {
+    half4 color = frame.eval(coord);
+    return mod(floor(coord.y), 3.0) == 0.0 ? half4(color.rgb * 0.7, color.a) : color;
+}
+```
+
+Things to know:
+
+- Colors are premultiplied by alpha. Pass `frame`'s alpha through to keep window transparency
+  and blur.
+- `frame` can be read anywhere in the window, not just at `coord`. Reads past the edges return
+  the nearest edge pixel, and reads between pixel centers blend the pixels around them.
+- Shaders that declare `time` or `time_delta` keep Neovide redrawing while the window has focus,
+  which uses more power than an idle window.
+- SkSL is close to GLSL ES 2.0: `for` loops need constant bounds, and there are no `while` loops,
+  bit operations or preprocessor `#define`s.
+
 ### Functionality
 
 #### Refresh Rate

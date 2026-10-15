@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use approx::AbsDiffEq;
 use itertools::Itertools;
-use skia_safe::{Canvas, Paint, Path, PathBuilder, op};
+use skia_safe::{Canvas, Color4f, Paint, Path, PathBuilder, Rect, op};
 use winit::event::WindowEvent;
 
 use crate::{
@@ -623,5 +623,32 @@ impl CursorRenderer {
 
     pub fn get_destination(&self) -> PixelPos<f32> {
         self.destination
+    }
+
+    /// The bounding box of the cursor as currently drawn, including its animation.
+    pub fn drawn_rect(&self) -> Rect {
+        let (xs, ys): (Vec<f32>, Vec<f32>) = self
+            .corners
+            .iter()
+            .map(|corner| (corner.current_position.x, corner.current_position.y))
+            .unzip();
+        let (left, right) = xs.into_iter().minmax().into_option().unwrap_or_default();
+        let (top, bottom) = ys.into_iter().minmax().into_option().unwrap_or_default();
+        Rect::new(left, top, right, bottom)
+    }
+
+    /// The premultiplied colour the cursor is currently drawn with, transparent while hidden.
+    pub fn drawn_color(&self, grid_renderer: &GridRenderer) -> Color4f {
+        let settings = self.settings.get::<CursorSettings>();
+        let visible = self.blink_status.should_render() || settings.smooth_blink;
+        if !(self.cursor.enabled && visible) {
+            return Color4f::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let opacity = if settings.smooth_blink { self.blink_status.opacity() } else { 1.0 };
+        let alpha = opacity * self.cursor.alpha() as f32 / 255.0;
+        let color = self
+            .cursor
+            .background(&grid_renderer.default_style.colors, settings.cell_color_fallback);
+        Color4f::new(color.r * alpha, color.g * alpha, color.b * alpha, alpha)
     }
 }
